@@ -1,10 +1,15 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <memory.h>
+#include <string.h>
 
-#include "mv.h"
 #include "aes.h"
+
+
+struct aesctx{
+	int NK, NB, NR;
+	aesblock roundkey[1];
+};
 
 
 const uint8_t sub_box[256] = {
@@ -114,6 +119,33 @@ const uint32_t rcon[44] = {
 #endif
 
 
+uint32_t rol(uint32_t word, uint32_t n){
+	n = n % 32;
+
+	#if __BYTE_ORDER == __ORDER_LITTLE_ENDIAN__
+		return (word >> n) | (word << (32 - n));
+	#else
+		return (word << n) | (word >> (32 - n));
+	#endif
+}
+
+
+const int shift_cols_lookup[16] = {
+    0,  5,  10, 15,
+    4,  9,  14, 3,
+    8,  13, 2,  7,
+    12, 1,  6,  11
+};
+
+
+const int inv_shift_cols_lookup[16] = {
+    0,  13, 10, 7,
+    4,  1,  14, 11,
+    8,  5,  2,  15,
+    12, 9,  6,  3
+};
+
+
 const uint8_t mix_mat[4][4] = {
 	{0x02, 0x03, 0x01, 0x01},
 	{0x01, 0x02, 0x03, 0x01},
@@ -130,21 +162,7 @@ const uint8_t inv_mix_mat[4][4] = {
 };
 
 
-void transpose(aesblock *dest, aesblock *src){
-	if(dest == src){
-		aesblock tmp;
-		transpose(&tmp, src);
-		*src = tmp;
-	}
-	else{
-		for(int i = 0; i < 4; ++i)
-		for(int j = 0; j < 4; ++j)
-			dest->grid[i][j] = src->grid[j][i];
-	}
-}
-
-
-void aes_print_block(aesblock *S){
+void aes_print(aesblock *S){
     for(int i = 0; i < 4; ++i){
         for(int j = 0; j < 4; ++j){
             printf("%.2x ", S->grid[i][j]);
@@ -183,39 +201,23 @@ void inv_sub_bytes(aesblock *S){
 }
 
 
-uint32_t rol(uint32_t word, uint32_t n){
-	n = n % 32;
+void shift_cols(aesblock *S){
+    aesblock T;
 
-	#if __BYTE_ORDER == __ORDER_LITTLE_ENDIAN__
-		return (word >> n) | (word << (32 - n));
-	#else
-		return (word << n) | (word >> (32 - n));
-	#endif
+    for(int i = 0; i < 16; ++i)
+        T.bytes[i] = S->bytes[shift_cols_lookup[i]];
+
+    *S = T;
 }
 
 
-uint32_t ror(uint32_t word, uint32_t n){
-	n = n % 32;
+void inv_shift_cols(aesblock *S){
+    aesblock T;
 
-	#if __BYTE_ORDER == __ORDER_LITTLE_ENDIAN__
-		return (word << n) | (word >> (32 - n));
-	#else
-		return (word >> n) | (word << (32 - n));
-	#endif
-}
+    for(int i = 0; i < 16; ++i)
+        T.bytes[i] = S->bytes[inv_shift_cols_lookup[i]];
 
-
-void shift_rows(aesblock *S){
-	S->rows[1] = rol(S->rows[1], 8);
-	S->rows[2] = rol(S->rows[2], 16);
-	S->rows[3] = rol(S->rows[3], 24);
-}
-
-
-void inv_shift_rows(aesblock *S){
-	S->rows[1] = ror(S->rows[1], 8);
-	S->rows[2] = ror(S->rows[2], 16);
-	S->rows[3] = ror(S->rows[3], 24);
+    *S = T;
 }
 
 
@@ -229,7 +231,7 @@ uint8_t multiply_bytes(uint8_t x, uint8_t y){
 
             acc ^= (tmp & 0xFF) * (mask & 1);
 
-            tmp = tmp << 1;
+            tmp <<= 1;
             tmp ^= 0x0000011b * ((tmp & 0x100) >> 8);
 
     }
@@ -245,8 +247,7 @@ void mix_columns(aesblock *S){
 	for(int i = 0; i < 4; ++i)
 	for(int j = 0; j < 4; ++j)
 	for(int k = 0; k < 4; ++k)
-		res.grid[i][j] ^= multiply_bytes(mix_mat[i][k], S->grid[k][j]);
-
+		res.grid[i][j] ^= multiply_bytes(S->grid[i][k], mix_mat[j][k]);
 
 	*S = res;
 }
@@ -259,8 +260,7 @@ void inv_mix_columns(aesblock *S){
 	for(int i = 0; i < 4; ++i)
 	for(int j = 0; j < 4; ++j)
 	for(int k = 0; k < 4; ++k)
-		res.grid[i][j] ^= multiply_bytes(inv_mix_mat[i][k], S->grid[k][j]);
-
+		res.grid[i][j] ^= multiply_bytes(S->grid[i][k], inv_mix_mat[j][k]);
 
 	*S = res;
 }
@@ -290,7 +290,7 @@ aesctx* aes_new_ctx(aesmode mode){
 	}
 
 
-	uint32_t size = sizeof(aesctx) + sizeof(aesblock) * NR;
+	size_t size = sizeof(aesctx) + sizeof(aesblock) * NR;
 	aesctx*	 res  = malloc(size);
 
 
@@ -306,7 +306,7 @@ aesctx* aes_new_ctx(aesmode mode){
 }
 
 
-int aes_set_key(aesctx* ctx, mv key){
+bool aes_set_key(aesctx* ctx, mv key){
 
     const int   NB = ctx->NB,
                 NK = ctx->NK,
@@ -315,7 +315,7 @@ int aes_set_key(aesctx* ctx, mv key){
 
 	// constrolli sulla dimensione della chiave
 	if(key.data == NULL || key.size != (NK * NB))
-		return 1;
+		return false;
 
 
 	uint32_t keysch[NB * (NR + 1)];
@@ -342,53 +342,48 @@ int aes_set_key(aesctx* ctx, mv key){
 		keysch[i] = keysch[i - NK] ^ tmp;
 	}
 
-	// scrivo le round key nel ctx
-	for(int round = 0; round < NR + 1; ++round)
-		transpose(ctx->roundkey + round * sizeof(aesblock), (aesblock*) (&keysch[4*round]));
+    memcpy(ctx->roundkey, keysch, sizeof(keysch));
 
-
-    return 0;
+    return true;
 }
 
 
-void aes_encrypt_block(aesblock* dest, aesblock* src, aesctx* ctx){
+void aes_encrypt(aesblock* dest, aesblock* src, aesctx* ctx){
 
     const int NR = ctx->NR;
 
 	*dest = *src;
-
 	add_round_key(dest, ctx->roundkey);
 
 	for(int round = 1; round < NR; ++round){
 		sub_bytes	 (dest);
-		shift_rows	 (dest);
+		shift_cols	 (dest);
 		mix_columns	 (dest);
-		add_round_key(dest, ctx->roundkey + round * sizeof(aesblock));
+		add_round_key(dest, ctx->roundkey + round);
 	}
 
 	sub_bytes	 (dest);
-	shift_rows	 (dest);
-	add_round_key(dest, ctx->roundkey + NR * sizeof(aesblock));
+	shift_cols	 (dest);
+	add_round_key(dest, ctx->roundkey + NR);
 
 }
 
 
-void aes_decrypt_block(aesblock* dest, aesblock* src, aesctx* ctx){
+void aes_decrypt(aesblock* dest, aesblock* src, aesctx* ctx){
 
     const int NR = ctx->NR;
 
 	*dest = *src;
-	add_round_key(dest, ctx->roundkey + NR * sizeof(aesblock));
+	add_round_key(dest, ctx->roundkey + NR);
 
 	for(int round = NR - 1; round != 0; --round){
-		inv_shift_rows	(dest);
+		inv_shift_cols	(dest);
 		inv_sub_bytes	(dest);
-		add_round_key	(dest, ctx->roundkey + round * sizeof(aesblock));
+		add_round_key	(dest, ctx->roundkey + round);
 		inv_mix_columns	(dest);
 	}
 
-	inv_shift_rows	(dest);
+	inv_shift_cols	(dest);
 	inv_sub_bytes	(dest);
 	add_round_key	(dest, ctx->roundkey);
-
 }
