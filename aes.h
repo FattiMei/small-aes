@@ -2,6 +2,7 @@
 #define AES_H
 
 
+#include <stdbool.h>
 #include "mv.h"
 
 
@@ -19,21 +20,19 @@ typedef enum aesmode{
 } aesmode;
 
 
-typedef struct aesctx{
-	int NK, NB, NR;
-	aesblock roundkey[1];
-} aesctx;
+typedef struct aesctx aesctx;
 
 
 // funzioni per gestire la struttura ctx
 aesctx* aes_new_ctx(aesmode);
-int    	aes_set_key(aesctx*, struct mv);
+bool   	aes_set_key(aesctx*, struct mv);
 
 
-void transpose(aesblock*, aesblock*);
-void aes_print_block(aesblock*);
-void aes_encrypt_block(aesblock*, aesblock*, aesctx *ctx);
-void aes_decrypt_block(aesblock*, aesblock*, aesctx *ctx);
+void aes_print      (aesblock*);
+void aes_transpose  (aesblock*, aesblock*);
+
+void aes_encrypt(aesblock*, aesblock*, aesctx *ctx);
+void aes_decrypt(aesblock*, aesblock*, aesctx *ctx);
 
 
 #endif
